@@ -758,6 +758,67 @@ func (r *ChildReconciler) items(children runtime.Object) []apis.Object {
 	return items
 }
 
+var (
+	_ SubReconciler = &ConditionalReconciler{}
+)
+
+type ConditionalReconciler struct {
+	// Conditional returns true if the reconciler should be applied
+	//
+	// Expected function signature:
+	//     func(ctx context.Context, parent apis.Object) bool
+	Conditional interface{}
+	Reconciler  SubReconciler
+}
+
+func (r *ConditionalReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, bldr *builder.Builder) error {
+	if err := r.validate(ctx); err != nil {
+		return err
+	}
+	return r.Reconciler.SetupWithManager(ctx, mgr, bldr)
+}
+
+func (r *ConditionalReconciler) Reconcile(ctx context.Context, parent apis.Object) (ctrl.Result, error) {
+	if r.conditional(ctx, parent) {
+		return r.Reconciler.Reconcile(ctx, parent)
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *ConditionalReconciler) validate(ctx context.Context) error {
+	parentType := RetrieveParentType(ctx)
+
+	// validate Reconciler value
+	if r.Reconciler == nil {
+		return fmt.Errorf("ConditionalReconciler must define Reconciler")
+	}
+
+	// validate Conditional function signature:
+	//     func(ctx context.Context, parent apis.Object) bool
+	if r.Conditional == nil {
+		return fmt.Errorf("ConditionalReconciler must define Conditional")
+	} else {
+		fn := reflect.TypeOf(r.Conditional)
+		if fn.NumIn() != 2 || fn.NumOut() != 1 ||
+			!reflect.TypeOf((*context.Context)(nil)).Elem().AssignableTo(fn.In(0)) ||
+			!reflect.TypeOf(parentType).AssignableTo(fn.In(1)) ||
+			fn.Out(0).Kind() != reflect.Bool {
+			return fmt.Errorf("ConditionalReconciler must implement Conditional: func(ctx context.Context, parent %s) bool, found: %s", reflect.TypeOf(parentType), fn)
+		}
+	}
+
+	return nil
+}
+
+func (r *ConditionalReconciler) conditional(ctx context.Context, parent apis.Object) bool {
+	fn := reflect.ValueOf(r.Conditional)
+	out := fn.Call([]reflect.Value{
+		reflect.ValueOf(ctx),
+		reflect.ValueOf(parent),
+	})
+	return out[0].Bool()
+}
+
 func typeName(i interface{}) string {
 	t := reflect.TypeOf(i)
 	// TODO do we need this?
